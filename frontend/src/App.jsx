@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { supabase } from './lib/supabase'
 import './App.css'
 
 const categories = [
@@ -46,9 +47,64 @@ const initialComplaints = [
   },
 ]
 
+const normalizeComplaint = (item) => ({
+  id: Number(item.id ?? Date.now()),
+  studentName: item.student_name || item.studentName || 'Student',
+  title: item.title || 'Untitled complaint',
+  category: item.category || 'Academic',
+  priority: item.priority || 'Medium',
+  status: item.status || 'Submitted',
+  date: item.created_at
+    ? new Date(item.created_at).toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric',
+      })
+    : item.date || 'Just now',
+  note: item.description || item.note || '',
+})
+
+const fetchComplaints = async () => {
+  try {
+    const { data, error } = await supabase.from('complaints').select('*').order('id', { ascending: false })
+
+    if (error) {
+      console.warn('Supabase complaint fetch failed, using fallback data:', error.message)
+      return initialComplaints
+    }
+
+    return (data ?? []).map(normalizeComplaint)
+  } catch (error) {
+    console.warn('Unexpected complaint fetch error, using fallback data:', error)
+    return initialComplaints
+  }
+}
+
 function App() {
   const [theme, setTheme] = useState('dark')
   const [complaints, setComplaints] = useState(initialComplaints)
+  const [session, setSession] = useState(null)
+  const [authModal, setAuthModal] = useState(null)
+  const [signInForm, setSignInForm] = useState({ email: '', password: '' })
+  const [signUpForm, setSignUpForm] = useState({
+    firstName: '',
+    lastName: '',
+    mobileNumber: '',
+    email: '',
+    password: '',
+  })
+  const [authMessage, setAuthMessage] = useState('')
+  const [authBanner, setAuthBanner] = useState(() => {
+    const savedBanner = window.localStorage.getItem('student-auth-banner')
+    return savedBanner ? JSON.parse(savedBanner) : null
+  })
+
+  const scrollToSection = (event, targetId) => {
+    if (event && typeof event.preventDefault === 'function') {
+      event.preventDefault()
+    }
+
+    document.getElementById(targetId)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
   const [complaintForm, setComplaintForm] = useState({
     name: '',
     title: '',
@@ -60,6 +116,7 @@ function App() {
   const [statusQuery, setStatusQuery] = useState('')
   const [statusResult, setStatusResult] = useState(null)
   const [selectedCategory, setSelectedCategory] = useState('All')
+  const [selectedStatusFilter, setSelectedStatusFilter] = useState('All')
 
   useEffect(() => {
     const savedTheme = window.localStorage.getItem('student-complaints-theme')
@@ -67,6 +124,46 @@ function App() {
 
     if (savedTheme) setTheme(savedTheme)
     if (savedComplaints) setComplaints(JSON.parse(savedComplaints))
+
+    const loadSession = async () => {
+      const {
+        data: { session: activeSession },
+      } = await supabase.auth.getSession()
+      setSession(activeSession)
+
+      if (activeSession?.user?.user_metadata?.first_name) {
+        const userName = `${activeSession.user.user_metadata.first_name || ''} ${activeSession.user.user_metadata.last_name || ''}`.trim()
+        if (userName) {
+          setComplaintForm((current) => ({ ...current, name: userName }))
+        }
+      }
+    }
+
+    loadSession()
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, currentSession) => {
+      setSession(currentSession)
+
+      if (currentSession?.user?.user_metadata?.first_name) {
+        const userName = `${currentSession.user.user_metadata.first_name || ''} ${currentSession.user.user_metadata.last_name || ''}`.trim()
+        if (userName) {
+          setComplaintForm((current) => ({ ...current, name: userName }))
+        }
+      }
+    })
+
+    return () => {
+      authListener?.subscription?.unsubscribe?.()
+    }
+  }, [])
+
+  useEffect(() => {
+    const loadComplaints = async () => {
+      const data = await fetchComplaints()
+      setComplaints(data)
+    }
+
+    loadComplaints()
   }, [])
 
   useEffect(() => {
@@ -76,6 +173,14 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem('student-complaints-list', JSON.stringify(complaints))
   }, [complaints])
+
+  useEffect(() => {
+    if (authBanner) {
+      window.localStorage.setItem('student-auth-banner', JSON.stringify(authBanner))
+    } else {
+      window.localStorage.removeItem('student-auth-banner')
+    }
+  }, [authBanner])
 
   const stats = [
     { label: 'Total complaints', value: complaints.length, tone: 'primary' },
@@ -98,7 +203,14 @@ function App() {
 
   const filteredComplaints = complaints.filter((item) => {
     const matchesCategory = selectedCategory === 'All' || item.category === selectedCategory
-    return matchesCategory
+
+    const matchesStatus =
+      selectedStatusFilter === 'All' ||
+      (selectedStatusFilter === 'InProgress' && item.status !== 'Resolved') ||
+      (selectedStatusFilter === 'Resolved' && item.status === 'Resolved') ||
+      (selectedStatusFilter === 'Urgent' && item.priority === 'High')
+
+    return matchesCategory && matchesStatus
   })
 
   const categorySummary = categories.map((category) => ({
@@ -106,17 +218,139 @@ function App() {
     count: complaints.filter((item) => item.category === category).length,
   }))
 
+  const handleStatusStatClick = (label) => {
+    if (label === 'Total complaints') {
+      setSelectedStatusFilter('All')
+    } else if (label === 'In progress') {
+      setSelectedStatusFilter('InProgress')
+    } else if (label === 'Resolved') {
+      setSelectedStatusFilter('Resolved')
+    } else if (label === 'Urgent') {
+      setSelectedStatusFilter('Urgent')
+    }
+
+    scrollToSection(null, 'complaint-board')
+  }
+
   const handleComplaintChange = (event) => {
     const { name, value } = event.target
     setComplaintForm((current) => ({ ...current, [name]: value }))
   }
 
-  const handleComplaintSubmit = (event) => {
+  const handleSignInChange = (event) => {
+    const { name, value } = event.target
+    setSignInForm((current) => ({ ...current, [name]: value }))
+  }
+
+  const handleSignUpChange = (event) => {
+    const { name, value } = event.target
+    setSignUpForm((current) => ({ ...current, [name]: value }))
+  }
+
+  const handleSignInSubmit = async (event) => {
+    event.preventDefault()
+
+    if (!signInForm.email.trim() || !signInForm.password.trim()) {
+      setAuthMessage('Please enter your Gmail and password to continue.')
+      return
+    }
+
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email: signInForm.email.trim(),
+      password: signInForm.password,
+    })
+
+    if (error) {
+      setAuthMessage(error.message)
+      return
+    }
+
+    setAuthMessage('')
+    const userName = `${data?.user?.user_metadata?.first_name || ''} ${data?.user?.user_metadata?.last_name || ''}`.trim()
+
+    setAuthBanner({
+      type: 'success',
+      title: 'Sign-in successful',
+      detail: userName ? `Welcome back, ${userName}!` : 'Welcome back! Your sign-in details were captured.',
+    })
+    setAuthModal(null)
+    setSignInForm({ email: '', password: '' })
+  }
+
+  const handleSignUpSubmit = async (event) => {
+    event.preventDefault()
+
+    const missingFields = Object.values(signUpForm).some((value) => !String(value).trim())
+
+    if (missingFields) {
+      setAuthMessage('Please fill in all sign-up details before continuing.')
+      return
+    }
+
+    const { data, error } = await supabase.auth.signUp({
+      email: signUpForm.email.trim(),
+      password: signUpForm.password,
+      options: {
+        data: {
+          first_name: signUpForm.firstName.trim(),
+          last_name: signUpForm.lastName.trim(),
+          mobile_number: signUpForm.mobileNumber.trim(),
+        },
+      },
+    })
+
+    if (error) {
+      setAuthMessage(error.message)
+      return
+    }
+
+    setAuthMessage('')
+    setAuthBanner({
+      type: 'success',
+      title: 'Sign-up successful',
+      detail: data?.user ? 'Your account was created in Supabase successfully.' : 'Your account details were captured successfully.',
+    })
+    setAuthModal(null)
+    setSignUpForm({
+      firstName: '',
+      lastName: '',
+      mobileNumber: '',
+      email: '',
+      password: '',
+    })
+  }
+
+  const handleComplaintSubmit = async (event) => {
     event.preventDefault()
 
     if (!complaintForm.name.trim() || !complaintForm.title.trim() || !complaintForm.description.trim()) {
       setFeedback('Please add your name, a title, and a clear description before submitting.')
       return
+    }
+
+    const payload = {
+      student_name: complaintForm.name.trim(),
+      title: complaintForm.title.trim(),
+      category: complaintForm.category,
+      priority: complaintForm.priority,
+      description: complaintForm.description.trim(),
+      status: 'Submitted',
+    }
+
+    try {
+      const { data, error } = await supabase.from('complaints').insert([payload]).select().single()
+
+      if (error) {
+        throw error
+      }
+
+      const newComplaint = normalizeComplaint(data)
+      setComplaints((current) => [newComplaint, ...current])
+      setComplaintForm({ name: '', title: '', category: 'Academic', priority: 'Medium', description: '' })
+      setFeedback('Complaint submitted successfully and saved in Supabase.')
+      return
+    } catch (error) {
+      console.warn('Supabase insert failed, using local fallback:', error)
     }
 
     const newComplaint = {
@@ -135,24 +369,49 @@ function App() {
 
     setComplaints((current) => [newComplaint, ...current])
     setComplaintForm({ name: '', title: '', category: 'Academic', priority: 'Medium', description: '' })
-    setFeedback('Complaint submitted successfully. You can check its status anytime.')
+    setFeedback('Complaint submitted locally. Create the complaints table in Supabase to enable live storage.')
   }
 
-  const checkStatus = (event) => {
+  const checkStatus = async (event) => {
     event.preventDefault()
 
     const id = Number(statusQuery)
-    const complaint = complaints.find((item) => item.id === id)
 
-    if (!complaint) {
-      setStatusResult({ found: false, message: 'No complaint found for that ID. Please try another number.' })
+    if (!Number.isInteger(id) || id <= 0) {
+      setStatusResult({ found: false, message: 'Please enter a valid complaint ID.' })
       return
     }
 
-    setStatusResult({
-      found: true,
-      complaint,
-    })
+    try {
+      const { data, error } = await supabase.from('complaints').select('*').eq('id', id).maybeSingle()
+
+      if (error && error.code !== 'PGRST116') {
+        throw error
+      }
+
+      if (!data) {
+        const fallbackComplaint = complaints.find((item) => item.id === id)
+        if (!fallbackComplaint) {
+          setStatusResult({ found: false, message: 'No complaint found for that ID. Please try another number.' })
+          return
+        }
+
+        setStatusResult({ found: true, complaint: fallbackComplaint })
+        return
+      }
+
+      setStatusResult({ found: true, complaint: normalizeComplaint(data) })
+    } catch (error) {
+      console.warn('Supabase status lookup failed, using local fallback:', error)
+      const fallbackComplaint = complaints.find((item) => item.id === id)
+
+      if (!fallbackComplaint) {
+        setStatusResult({ found: false, message: 'No complaint found for that ID. Please try another number.' })
+        return
+      }
+
+      setStatusResult({ found: true, complaint: fallbackComplaint })
+    }
   }
 
   return (
@@ -166,11 +425,11 @@ function App() {
           </div>
         </div>
         <div className="nav-links">
-          <a href="#about">Home</a>
-          <a href="#details">Details</a>
-          <a href="#contact">Contact Us</a>
-          <a href="#sign-in" className="nav-btn">Sign in</a>
-          <a href="#sign-up" className="nav-btn">Sign up</a>
+          <a href="#about" onClick={(event) => scrollToSection(event, 'about')}>Home</a>
+          <a href="#details" onClick={(event) => scrollToSection(event, 'details')}>Details</a>
+          <a href="#contact" onClick={(event) => scrollToSection(event, 'contact')}>Contact Us</a>
+          <button type="button" className="nav-btn" onClick={() => setAuthModal('sign-in')}>Sign in</button>
+          <button type="button" className="nav-btn" onClick={() => setAuthModal('sign-up')}>Sign up</button>
         </div>
       </nav>
 
@@ -214,10 +473,16 @@ function App() {
 
       <section className="stats-grid" aria-label="System summary">
         {stats.map((item) => (
-          <article className={`stat-card ${item.tone}`} key={item.label}>
+          <button
+            type="button"
+            className={`stat-card ${item.tone}`}
+            key={item.label}
+            aria-label={`Show ${item.label.toLowerCase()} complaints`}
+            onClick={() => handleStatusStatClick(item.label)}
+          >
             <p>{item.label}</p>
             <strong>{item.value}</strong>
-          </article>
+          </button>
         ))}
       </section>
 
@@ -251,7 +516,10 @@ function App() {
                 type="button"
                 key={item.name}
                 className={`category-pill ${selectedCategory === item.name ? 'active' : ''}`}
-                onClick={() => setSelectedCategory(item.name)}
+                onClick={() => {
+                  setSelectedCategory(item.name)
+                  scrollToSection(null, 'complaint-board')
+                }}
               >
                 <span>{item.name}</span>
                 <strong>{item.count}</strong>
@@ -260,7 +528,10 @@ function App() {
             <button
               type="button"
               className={`category-pill ${selectedCategory === 'All' ? 'active' : ''}`}
-              onClick={() => setSelectedCategory('All')}
+              onClick={() => {
+                setSelectedCategory('All')
+                scrollToSection(null, 'complaint-board')
+              }}
             >
               <span>All</span>
               <strong>{complaints.length}</strong>
@@ -370,7 +641,7 @@ function App() {
         </div>
       </section>
 
-      <section className="panel complaint-board" id="contact">
+      <section className="panel complaint-board" id="complaint-board">
         <div className="panel-heading">
           <div>
             <p className="eyebrow">Student complaints</p>
@@ -407,23 +678,109 @@ function App() {
         </div>
       </section>
 
-      <footer className="site-footer">
+      <div className="back-to-top-wrap">
+        <button type="button" className="back-to-top-btn" onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}>
+          ↑ Back to top
+        </button>
+      </div>
+
+      {authBanner ? (
+        <div className="auth-success-banner">
+          <div>
+            <span className="banner-icon">✓</span>
+            <div>
+              <strong>{authBanner.title}</strong>
+              <span>{authBanner.detail}</span>
+            </div>
+          </div>
+          <button type="button" className="banner-close" aria-label="Dismiss success message" onClick={() => {
+            setAuthBanner(null)
+            window.localStorage.removeItem('student-auth-banner')
+          }}>
+            ×
+          </button>
+        </div>
+      ) : null}
+
+      {authMessage ? <div className="auth-status-message">{authMessage}</div> : null}
+
+      {authModal ? (
+        <div className="auth-modal-overlay">
+          <div className="auth-modal">
+            <div className="auth-modal-header">
+              <div>
+                <p className="eyebrow">Student Access</p>
+                <h3>{authModal === 'sign-in' ? 'Sign In' : 'Create Account'}</h3>
+              </div>
+              <button type="button" className="icon-close" aria-label="Close authentication form" onClick={() => setAuthModal(null)}>
+                ×
+              </button>
+            </div>
+
+            {authModal === 'sign-in' ? (
+              <form className="auth-form" onSubmit={handleSignInSubmit}>
+                <label>
+                  <span>Gmail</span>
+                  <input type="email" name="email" placeholder="student@gmail.com" value={signInForm.email} onChange={handleSignInChange} />
+                </label>
+                <label>
+                  <span>Password</span>
+                  <input type="password" name="password" placeholder="Enter password" value={signInForm.password} onChange={handleSignInChange} />
+                </label>
+                <button type="submit" className="primary-btn full-width">Sign In</button>
+              </form>
+            ) : (
+              <form className="auth-form" onSubmit={handleSignUpSubmit}>
+                <div className="inline-fields auth-inline">
+                  <label>
+                    <span>First Name</span>
+                    <input type="text" name="firstName" placeholder="First name" value={signUpForm.firstName} onChange={handleSignUpChange} />
+                  </label>
+                  <label>
+                    <span>Last Name</span>
+                    <input type="text" name="lastName" placeholder="Last name" value={signUpForm.lastName} onChange={handleSignUpChange} />
+                  </label>
+                </div>
+
+                <label>
+                  <span>Mobile Number</span>
+                  <input type="tel" name="mobileNumber" placeholder="Enter mobile number" value={signUpForm.mobileNumber} onChange={handleSignUpChange} />
+                </label>
+
+                <label>
+                  <span>Email ID</span>
+                  <input type="email" name="email" placeholder="student@gmail.com" value={signUpForm.email} onChange={handleSignUpChange} />
+                </label>
+
+                <label>
+                  <span>Password</span>
+                  <input type="password" name="password" placeholder="Create password" value={signUpForm.password} onChange={handleSignUpChange} />
+                </label>
+
+                <button type="submit" className="primary-btn full-width">Sign Up</button>
+              </form>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      <footer className="site-footer" id="contact">
         <div className="footer-column">
           <h4>Get to Know Us</h4>
-          <a href="#about">About the platform</a>
-          <a href="#details">How it works</a>
-          <a href="#contact">Contact support</a>
+          <a href="#about" onClick={(event) => scrollToSection(event, 'about')}>About the platform</a>
+          <a href="#details" onClick={(event) => scrollToSection(event, 'details')}>How it works</a>
+          <a href="#contact" onClick={(event) => scrollToSection(event, 'contact')}>Contact support</a>
         </div>
         <div className="footer-column">
           <h4>Student Services</h4>
-          <a href="#about">Submit complaint</a>
-          <a href="#about">Track status</a>
-          <a href="#about">Category guide</a>
+          <a href="#complaint-board" onClick={(event) => scrollToSection(event, 'complaint-board')}>Submit complaint</a>
+          <a href="#complaint-board" onClick={(event) => scrollToSection(event, 'complaint-board')}>Track status</a>
+          <a href="#complaint-board" onClick={(event) => scrollToSection(event, 'complaint-board')}>Category guide</a>
         </div>
-        <div className="footer-column">
+        <div className="footer-column" id="footer-contact-us">
           <h4>Contact Us</h4>
-          <a href="mailto:support@studentcomplainthub.com">support@studentcomplainthub.com</a>
-          <a href="tel:+15551234567">+1 (555) 123-4567</a>
+          <a href="mailto:gandhamprakashtech@gmail.com">gandhamprakashtech@gmail.com</a>
+          <a href="mailto:shivag1436@gmail.com">shivag1436@gmail.com</a>
           <span>Campus Help Desk • Mon-Fri 8AM-6PM</span>
         </div>
       </footer>
